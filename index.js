@@ -8,14 +8,10 @@ function OutputCache(options) {
 
     _options = options || {};
 
-    var SLRUOptions = {
+    _localCache = new SLRU({
         maxSize: _options.maxItems || _defaultMaxSize,
         maxAge: _options.ttl || _localCacheTtl
-    };
-
-    if(_options.staleWhileRevalidate) {
-        SLRUOptions.staleWhileRevalidate = _options.staleWhileRevalidate;
-    }
+    });
 
     if (!_options.varyByCookies || !Array.isArray(_options.varyByCookies)) {
         _options.varyByCookies = [];
@@ -25,11 +21,9 @@ function OutputCache(options) {
         _options.noHeaders = false;
     }
 
-    if (!_options.logLevel) {
+    if(!_options.logLevel) {
         _options.logLevel = 'debug';
     }
-
-    _localCache = new SLRU(SLRUOptions);
 
     this.ttl = _options.ttl;
     this.maxItems = _options.maxItems;
@@ -42,22 +36,28 @@ function OutputCache(options) {
     this.skip3xx = _options.skip3xx;
     this.skip5xx = _options.skip5xx;
     this.noHeaders = _options.noHeaders;
-    this.staleWhileRevalidate = _options.staleWhileRevalidate;
-
+    this.varyByItemCache = _options.varyByItemCache;
 }
 
 var _outputCache = {
 
     helpers: {
 
-        setHeadersOnCacheItem: function onSetHeaders(req, res, cacheItem) {
+        setHeadersOnCacheItem: function onSetHeaders(req, res, cacheItem, headers) {
 
-            cacheItem.headers = JSON.parse(JSON.stringify(res._headers));
-            var responseCacheHeader = res._headers['cache-control'];
+            cacheItem.headers = headers;
+            var responseCacheHeader = headers['cache-control'];
 
             if (!responseCacheHeader) {
-                var staleWhileRevalidateInfo = _options.staleWhileRevalidate ? ', stale-while-revalidate=' + _options.staleWhileRevalidate : '';
-                cacheItem.headers['cache-control'] = 'max-age=' + (_options.ttl || _localCacheTtl) + staleWhileRevalidateInfo;
+                var age = (_options.ttl || _localCacheTtl)
+                
+                if (_options.varyByItemCache && typeof _options.varyByItemCache == "function") {
+                   var temp =  _options.varyByItemCache(req, res, cacheItem)
+
+                   if (temp) age = temp;
+                }
+
+                cacheItem.headers['cache-control'] = 'max-age=' + age;
             }
             return cacheItem;
 
@@ -72,18 +72,12 @@ var _outputCache = {
         },
         setLocalCache: function onSetLocalCache(cacheKey, cacheItem, ttlFromCacheHeader) {
 
-            var setCacheOptions = { maxAge: cacheItem.ttl };
-
-            if(_options.staleWhileRevalidate) {
-                setCacheOptions.staleWhileRevalidate = _options.staleWhileRevalidate;
-            }
-
             if (_options.useCacheHeader === false) {
                 cacheItem.ttl = _options.ttl || _localCacheTtl;
-                _localCache.set(cacheKey, cacheItem, setCacheOptions);
+                _localCache.set(cacheKey, cacheItem, {maxAge: cacheItem.ttl});
             } else {
                 cacheItem.ttl = ttlFromCacheHeader || (_options.ttl || _localCacheTtl);
-                _localCache.set(cacheKey, cacheItem, setCacheOptions);
+                _localCache.set(cacheKey, cacheItem, {maxAge: cacheItem.ttl});
             }
 
         }
@@ -95,7 +89,7 @@ var _outputCache = {
         var isCacheSkip = ((resHeadersRaw['x-output-cache'] && resHeadersRaw['x-output-cache'] === 'ms') || req.query.cache === "false" || (cookies && cookies['x-output-cache'] === 'ms'));
 
         if (isCacheSkip) {
-
+          
             if (!_options.noHeaders) {
                 res.set({ 'X-Output-Cache': 'ms' });
             }
@@ -125,8 +119,8 @@ var _outputCache = {
 
             res.send = function onOverrideSend(a, b) {
 
-                var responseToCache = _outputCache.helpers.setHeadersOnCacheItem(req, res, {});
-
+                var responseToCache = _outputCache.helpers.setHeadersOnCacheItem(req, res, {}, resHeadersRaw);
+                
                 if (!_options.noHeaders) {
                     res.set({ 'X-Output-Cache': 'ms' });
                 }
@@ -153,7 +147,7 @@ var _outputCache = {
                 redirectResponse.original = req.originalUrl;
                 redirectResponse.redirect = address;
                 redirectResponse.status = status || 302;
-
+                
                 if (!_options.noHeaders) {
                     res.set({ 'X-Output-Cache': 'ms' });
                 }
@@ -177,8 +171,7 @@ var _outputCache = {
             res.set(cacheResult.headers);
 
             if (!_options.noHeaders) {
-                var staleWhileRevalidateInfo = _options.staleWhileRevalidate ? ', stale-while-revalidate ' + _options.staleWhileRevalidate : '';
-                res.set({ 'X-Output-Cache': 'ht ' + cacheResult.ttl + staleWhileRevalidateInfo });
+                res.set({ 'X-Output-Cache': 'ht ' + cacheResult.ttl });
             }
 
             res.statusCode = cacheResult.status;
@@ -187,17 +180,12 @@ var _outputCache = {
             var logLevel = _options.logLevel;
 
             if (cacheResult.redirect && logger && logger[logLevel]) {
-                logger[logLevel]('{"metric": "hit-ratio", "name": "outputcache", "desc": "ht redirect", "data": { "request":"' + cacheResult.original + '", "redirect": "' + cacheResult.redirect + '", "status": "' + cacheResult.status + '" ,"key": "' + cacheKey + '", "ttl" : "' + cacheResult.ttl +  (_options.staleWhileRevalidate ? ', "staleWhileRevalidate": "' + (_options.staleWhileRevalidate) + '"}}' : '"}}'));
+                logger[logLevel]('{"metric": "hit-ratio", "name": "outputcache", "desc": "ht redirect", "data": { "request":"' + cacheResult.original + '", "redirect": "' + cacheResult.redirect + '", "status": "' + cacheResult.status + '", "key": "' + cacheKey + '", "ttl" : "' + cacheResult.ttl + '"}}');
             } else if (logger && logger[logLevel]) {
-                logger[logLevel]('{"metric": "hit-ratio", "name": "outputcache", "desc": "ht render", "data": { "request":"' + req.originalUrl + '", "status": "' + cacheResult.status + '", "key": "' + cacheKey + '", "ttl": "' + cacheResult.ttl  + (_options.staleWhileRevalidate ? ', "staleWhileRevalidate": "' + (_options.staleWhileRevalidate) + '"}}' : '"}}'));
+                logger[logLevel]('{"metric": "hit-ratio", "name": "outputcache", "desc": "ht render", "data": { "request":"' + req.originalUrl + '", "status": "' + cacheResult.status + '", "key": "' + cacheKey + '", "ttl": "' + cacheResult.ttl + '"}}');
             }
-
-
-            if (cacheResult.redirect) {
-                return res.redirect(cacheResult.status, cacheResult.redirect);
-            }
-
-            return res.send(cacheResult.body);
+            
+            return res.end(cacheResult.body);
 
         }
 
