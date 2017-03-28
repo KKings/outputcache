@@ -45,8 +45,8 @@ var _outputCache = {
 
         setHeadersOnCacheItem: function onSetHeaders(req, res, cacheItem, headers) {
 
-            cacheItem.headers = headers;
-            var responseCacheHeader = headers['cache-control'];
+            cacheItem.headers = JSON.parse(JSON.stringify(res._headers));
+            var responseCacheHeader = res._headers['cache-control'];
 
             if (!responseCacheHeader) {
                 var age = (_options.ttl || _localCacheTtl)
